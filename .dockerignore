@@ -1,0 +1,45 @@
+# filepath: c:\job\proxy_purchase_systems\.dockerignore
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local files that shouldn't be in container
+*.md
+README.md
+test_gui.html
+uploaded_pdfs/  # This will be created fresh in container
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Cloud Build
+cloudbuild.yaml

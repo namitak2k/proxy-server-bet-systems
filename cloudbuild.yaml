@@ -1,0 +1,43 @@
+# filepath: c:\job\proxy_purchase_systems\cloudbuild.yaml
+# GCP Cloud Build configuration for building and deploying to Cloud Run
+# Usage: gcloud builds submit --config=cloudbuild.yaml .
+
+steps:
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/purchase-server:$COMMIT_SHA', '.']
+
+  # Push the container image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/purchase-server:$COMMIT_SHA']
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'purchase-server'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/purchase-server:$COMMIT_SHA'
+      - '--region'
+      - '${_REGION}'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+      - '--set-env-vars'
+      - 'RAKURAKU_REGISTER_URL=${_RAKURAKU_REGISTER_URL},RAKURAKU_UPDATE_URL=${_RAKURAKU_UPDATE_URL},RAKURAKU_TOKEN=${_RAKURAKU_TOKEN},BAKURAKU_FILE_UPLOAD_URL=${_BAKURAKU_FILE_UPLOAD_URL},BAKURAKU_APPLICATION_URL=${_BAKURAKU_APPLICATION_URL},BAKURAKU_STATUS_URL=${_BAKURAKU_STATUS_URL},BAKURAKU_TOKEN=${_BAKURAKU_TOKEN},POLLING_INTERVAL_SECONDS=${_POLLING_INTERVAL_SECONDS}'
+
+substitutions:
+  _REGION: asia-northeast1
+  _RAKURAKU_REGISTER_URL: ""
+  _RAKURAKU_UPDATE_URL: ""
+  _RAKURAKU_TOKEN: ""
+  _BAKURAKU_FILE_UPLOAD_URL: ""
+  _BAKURAKU_APPLICATION_URL: ""
+  _BAKURAKU_STATUS_URL: ""
+  _BAKURAKU_TOKEN: ""
+  _POLLING_INTERVAL_SECONDS: "60"
+
+images:
+  - 'gcr.io/$PROJECT_ID/purchase-server:$COMMIT_SHA'

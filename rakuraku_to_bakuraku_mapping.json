@@ -1,0 +1,30 @@
+[
+  {
+    "source": "title",
+    "target": "title"
+  },
+  {
+    "source": "status",
+    "target": "status"
+  },
+  {
+    "source": "clientName",
+    "target": "defaultFieldValue.clientName"
+  },
+  {
+    "source": "paymentAmount",
+    "target": "defaultFieldValue.paymentAmount"
+  },
+  {
+    "source": "approvalRemindsDate",
+    "target": "defaultFieldValue.approvalRemindsDate"
+  },
+  {
+    "source": "purchaseCloseScheduledDate",
+    "target": "defaultFieldValue.purchaseCloseScheduledDate"
+  },
+  {
+    "source": "tradingDate",
+    "target": "defaultFieldValue.tradingDate"
+  }
+]

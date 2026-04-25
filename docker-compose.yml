@@ -1,0 +1,24 @@
+# filepath: c:\job\proxy_purchase_systems\docker-compose.yml
+version: '3.8'
+
+services:
+  purchase-server:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - RAKURAKU_REGISTER_URL=${RAKURAKU_REGISTER_URL}
+      - RAKURAKU_UPDATE_URL=${RAKURAKU_UPDATE_URL}
+      - RAKURAKU_TOKEN=${RAKURAKU_TOKEN}
+      - BAKURAKU_FILE_UPLOAD_URL=${BAKURAKU_FILE_UPLOAD_URL}
+      - BAKURAKU_APPLICATION_URL=${BAKURAKU_APPLICATION_URL}
+      - BAKURAKU_STATUS_URL=${BAKURAKU_STATUS_URL}
+      - BAKURAKU_TOKEN=${BAKURAKU_TOKEN}
+      - POLLING_INTERVAL_SECONDS=${POLLING_INTERVAL_SECONDS:-60}
+      - BAKURAKU_FORM_ID=${BAKURAKU_FORM_ID:-}
+    volumes:
+      - uploaded_pdfs:/app/uploaded_pdfs
+    restart: unless-stopped
+
+volumes:
+  uploaded_pdfs:

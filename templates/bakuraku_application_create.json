@@ -1,0 +1,21 @@
+{
+  "title": "test",
+  "status": "IN_PROGRESS",
+  "formId": "01KPQXJ5SB31ETJCPSBZ01NEBR",
+  "defaultFieldValue": {
+    "clientName": "test",
+    "paymentAmount": 20500000,
+    "approvalRemindsDate": "2026-04-26",
+    "purchaseCloseScheduledDate": "2026-04-26",
+    "tradingDate": "2026-04-26"
+  },
+  "formFieldValues": [
+    {
+      "formFieldTitle": "プロジェクト名",
+      "rawValue": "project1"
+    }
+  ],
+  "fileIds": [
+    "01KPQY9WNXRSP2FAB96J5BTDN4"
+  ]
+}
