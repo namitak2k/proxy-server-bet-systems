@@ -258,6 +258,10 @@ def _start_polling_worker() -> None:
 def health_check() -> Dict[str, str]:
     return {"status": "ok"}
 
+@app.get("/ip")
+def get_ip():
+    return requests.get("https://ifconfig.me").text
+
 
 @app.post("/api/gui/purchase-submissions", status_code=201)
 async def receive_purchase_submission(
