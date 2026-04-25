@@ -1,0 +1,5 @@
+### Python
+__pycache__/
+venv/
+.env
+uploaded_pdfs/  # This will be created fresh in container
