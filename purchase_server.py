@@ -44,6 +44,11 @@ BAKURAKU_APPLICATION_LINKS: Dict[str, Dict[str, Any]] = {}
 
 BAKURAKU_FORM_ID = os.getenv("BAKURAKU_FORM_ID", "").strip()
 BAKURAKU_POLLING_INTERVAL_SECONDS = int(os.getenv("BAKURAKU_POLLING_INTERVAL_SECONDS", "60"))
+BAKURAKU_TERMINAL_STATUS_TO_RAKURAKU_STATUS = {
+    "APPROVED": "承認",
+    "REJECTED": "差戻",
+    "CANCELED": "差戻",
+}
 
 _polling_started = False
 
@@ -240,12 +245,20 @@ def _store_bakuraku_application_link(
     return link
 
 
-def _poll_bakuraku_application_links() -> None:
-    terminal_statuses = {"APPROVED", "REJECTED"}
+def _build_rakuraku_status_update_payload(rakuraku_record_id: str, status_value: str) -> Dict[str, Any]:
+    return {
+        "dbSchemaId": "101251",
+        "id": rakuraku_record_id,
+        "values": {
+            "109935": status_value,
+        },
+    }
 
+
+def _poll_bakuraku_application_links() -> None:
     while True:
         for application_id, link in list(BAKURAKU_APPLICATION_LINKS.items()):
-            if link["bakuraku_status"] in terminal_statuses:
+            if link.get("rakuraku_update_completed"):
                 continue
 
             try:
