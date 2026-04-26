@@ -50,6 +50,7 @@ FIRESTORE_COLLECTION_NAME = os.getenv(
     "FIRESTORE_COLLECTION_NAME",
     "bakuraku_application_links",
 ).strip()
+FIRESTORE_DATABASE_ID = os.getenv("FIRESTORE_DATABASE_ID", "(default)").strip()
 BAKURAKU_TERMINAL_STATUS_TO_RAKURAKU_STATUS = {
     "APPROVED": "承認",
     "REJECTED": "差戻",
@@ -97,7 +98,7 @@ def _firestore_links_collection():
 
     if _firestore_client is None:
         try:
-            _firestore_client = firestore.Client()
+            _firestore_client = firestore.Client(database=FIRESTORE_DATABASE_ID)
         except Exception:
             return None
 
