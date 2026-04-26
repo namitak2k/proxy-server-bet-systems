@@ -75,12 +75,20 @@ class RelayClient:
 
     def _post_json(self, url: str, payload: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
         response = requests.post(url, json=payload, headers=headers, timeout=30)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            raise requests.HTTPError(
+                f"{exc}; response_body={response.text}; request_payload={json.dumps(payload, ensure_ascii=False)}"
+            ) from exc
         return response.json()
 
     def _get_json(self, url: str, headers: Dict[str, str]) -> Dict[str, Any]:
         response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            raise requests.HTTPError(f"{exc}; response_body={response.text}") from exc
         return response.json()
 
     def _post_multipart(
