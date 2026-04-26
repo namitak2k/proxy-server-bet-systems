@@ -269,10 +269,32 @@ def _poll_bakuraku_application_links() -> None:
             link["last_checked_at"] = _now_iso()
             link["last_status_response"] = status_response
             new_status = status_response.get("status") or link["bakuraku_status"]
+            normalized_status = str(new_status).upper()
 
-            if new_status in terminal_statuses:
+            if normalized_status in BAKURAKU_TERMINAL_STATUS_TO_RAKURAKU_STATUS:
+                rakuraku_status = BAKURAKU_TERMINAL_STATUS_TO_RAKURAKU_STATUS[normalized_status]
+                rakuraku_update_payload = _build_rakuraku_status_update_payload(
+                    link["rakuraku_record_id"],
+                    rakuraku_status,
+                )
+
+                try:
+                    rakuraku_update_response = relay_client.post_rakuraku_record_update(
+                        rakuraku_update_payload
+                    )
+                except Exception as exc:
+                    link["rakuraku_update_error"] = str(exc)
+                    link["rakuraku_update_payload"] = rakuraku_update_payload
+                    link["rakuraku_update_failed_at"] = _now_iso()
+                    continue
+
                 link["bakuraku_status"] = new_status
                 link["status_updated_at"] = _now_iso()
+                link["rakuraku_status"] = rakuraku_status
+                link["rakuraku_update_payload"] = rakuraku_update_payload
+                link["rakuraku_update_response"] = rakuraku_update_response
+                link["rakuraku_update_completed"] = True
+                link["rakuraku_updated_at"] = _now_iso()
 
         time.sleep(BAKURAKU_POLLING_INTERVAL_SECONDS)
 
