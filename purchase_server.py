@@ -1,7 +1,5 @@
 import json
 import os
-import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -14,6 +12,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, HttpUrl
 
 from relay_server import relay_client
+
+try:
+    from google.cloud import firestore
+except ImportError:
+    firestore = None
 
 
 app = FastAPI(
@@ -43,15 +46,17 @@ RAKURAKU_RECEIVED_REQUESTS: Dict[str, Dict[str, Any]] = {}
 BAKURAKU_APPLICATION_LINKS: Dict[str, Dict[str, Any]] = {}
 
 BAKURAKU_FORM_ID = os.getenv("BAKURAKU_FORM_ID", "").strip()
-BAKURAKU_POLLING_INTERVAL_SECONDS = int(os.getenv("BAKURAKU_POLLING_INTERVAL_SECONDS", "60"))
+FIRESTORE_COLLECTION_NAME = os.getenv(
+    "FIRESTORE_COLLECTION_NAME",
+    "bakuraku_application_links",
+).strip()
 BAKURAKU_TERMINAL_STATUS_TO_RAKURAKU_STATUS = {
     "APPROVED": "承認",
     "REJECTED": "差戻",
     "CANCELED": "差戻",
 }
 
-_polling_started = False
-
+_firestore_client = None
 
 class PurchaseItem(BaseModel):
     item_code: str = Field(..., description="Item code from the GUI.")
@@ -82,6 +87,54 @@ class GuiNotificationPayload(BaseModel):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _firestore_links_collection():
+    global _firestore_client
+
+    if firestore is None:
+        return None
+
+    if _firestore_client is None:
+        try:
+            _firestore_client = firestore.Client()
+        except Exception:
+            return None
+
+    return _firestore_client.collection(FIRESTORE_COLLECTION_NAME)
+
+
+def _save_bakuraku_application_link(application_id: str, link: Dict[str, Any]) -> None:
+    BAKURAKU_APPLICATION_LINKS[application_id] = link
+
+    collection = _firestore_links_collection()
+    if collection is None:
+        return
+
+    try:
+        collection.document(application_id).set(link)
+        link.pop("firestore_error", None)
+    except Exception as exc:
+        link["firestore_error"] = str(exc)
+
+
+def _iter_bakuraku_application_links() -> List[tuple[str, Dict[str, Any]]]:
+    collection = _firestore_links_collection()
+    if collection is None:
+        return list(BAKURAKU_APPLICATION_LINKS.items())
+
+    links = []
+    try:
+        documents = collection.stream()
+        for document in documents:
+            link = document.to_dict() or {}
+            if link.get("rakuraku_update_completed"):
+                continue
+            links.append((document.id, link))
+    except Exception:
+        return list(BAKURAKU_APPLICATION_LINKS.items())
+
+    return links
 
 
 def _parse_json_array(raw_value: Any, field_name: str) -> List[Any]:
@@ -241,7 +294,7 @@ def _store_bakuraku_application_link(
         "linked_at": _now_iso(),
         "last_checked_at": None,
     }
-    BAKURAKU_APPLICATION_LINKS[application_id] = link
+    _save_bakuraku_application_link(application_id, link)
     return link
 
 
@@ -255,65 +308,97 @@ def _build_rakuraku_status_update_payload(rakuraku_record_id: str, status_value:
     }
 
 
-def _poll_bakuraku_application_links() -> None:
-    while True:
-        for application_id, link in list(BAKURAKU_APPLICATION_LINKS.items()):
-            if link.get("rakuraku_update_completed"):
-                continue
+def _poll_bakuraku_application_links_once() -> Dict[str, Any]:
+    result = {
+        "checked": 0,
+        "skipped": 0,
+        "updated": 0,
+        "failed": 0,
+        "links": [],
+    }
 
-            try:
-                status_response = relay_client.get_bakuraku_application_status(application_id)
-            except Exception:
-                continue
+    for application_id, link in _iter_bakuraku_application_links():
+        if link.get("rakuraku_update_completed"):
+            result["skipped"] += 1
+            continue
 
-            link["last_checked_at"] = _now_iso()
-            link["last_status_response"] = status_response
-            new_status = status_response.get("status") or link["bakuraku_status"]
-            normalized_status = str(new_status).upper()
+        result["checked"] += 1
+        link_result = {
+            "application_id": application_id,
+            "rakuraku_record_id": link["rakuraku_record_id"],
+            "updated": False,
+        }
 
-            if normalized_status in BAKURAKU_TERMINAL_STATUS_TO_RAKURAKU_STATUS:
-                rakuraku_status = BAKURAKU_TERMINAL_STATUS_TO_RAKURAKU_STATUS[normalized_status]
-                rakuraku_update_payload = _build_rakuraku_status_update_payload(
-                    link["rakuraku_record_id"],
-                    rakuraku_status,
-                )
+        try:
+            status_response = relay_client.get_bakuraku_application_status(application_id)
+        except Exception as exc:
+            link["last_poll_error"] = str(exc)
+            link["last_poll_failed_at"] = _now_iso()
+            _save_bakuraku_application_link(application_id, link)
+            link_result["error"] = str(exc)
+            result["failed"] += 1
+            result["links"].append(link_result)
+            continue
 
-                try:
-                    rakuraku_update_response = relay_client.post_rakuraku_record_update(
-                        rakuraku_update_payload
-                    )
-                except Exception as exc:
-                    link["rakuraku_update_error"] = str(exc)
-                    link["rakuraku_update_payload"] = rakuraku_update_payload
-                    link["rakuraku_update_failed_at"] = _now_iso()
-                    continue
+        link["last_checked_at"] = _now_iso()
+        link["last_status_response"] = status_response
+        new_status = status_response.get("status") or link["bakuraku_status"]
+        normalized_status = str(new_status).upper()
+        link["bakuraku_status"] = new_status
+        link_result["bakuraku_status"] = new_status
 
-                link["bakuraku_status"] = new_status
-                link["status_updated_at"] = _now_iso()
-                link["rakuraku_status"] = rakuraku_status
-                link["rakuraku_update_payload"] = rakuraku_update_payload
-                link["rakuraku_update_response"] = rakuraku_update_response
-                link["rakuraku_update_completed"] = True
-                link["rakuraku_updated_at"] = _now_iso()
+        if normalized_status not in BAKURAKU_TERMINAL_STATUS_TO_RAKURAKU_STATUS:
+            _save_bakuraku_application_link(application_id, link)
+            result["links"].append(link_result)
+            continue
 
-        time.sleep(BAKURAKU_POLLING_INTERVAL_SECONDS)
+        rakuraku_status = BAKURAKU_TERMINAL_STATUS_TO_RAKURAKU_STATUS[normalized_status]
+        rakuraku_update_payload = _build_rakuraku_status_update_payload(
+            link["rakuraku_record_id"],
+            rakuraku_status,
+        )
 
+        try:
+            rakuraku_update_response = relay_client.post_rakuraku_record_update(
+                rakuraku_update_payload
+            )
+        except Exception as exc:
+            link["rakuraku_update_error"] = str(exc)
+            link["rakuraku_update_payload"] = rakuraku_update_payload
+            link["rakuraku_update_failed_at"] = _now_iso()
+            _save_bakuraku_application_link(application_id, link)
+            link_result["error"] = str(exc)
+            result["failed"] += 1
+            result["links"].append(link_result)
+            continue
 
-@app.on_event("startup")
-def _start_polling_worker() -> None:
-    global _polling_started
+        link["status_updated_at"] = _now_iso()
+        link["rakuraku_status"] = rakuraku_status
+        link["rakuraku_update_payload"] = rakuraku_update_payload
+        link["rakuraku_update_response"] = rakuraku_update_response
+        link["rakuraku_update_completed"] = True
+        link["rakuraku_updated_at"] = _now_iso()
+        link_result["rakuraku_status"] = rakuraku_status
+        link_result["updated"] = True
+        _save_bakuraku_application_link(application_id, link)
+        result["updated"] += 1
+        result["links"].append(link_result)
 
-    if _polling_started:
-        return
-
-    worker = threading.Thread(target=_poll_bakuraku_application_links, daemon=True)
-    worker.start()
-    _polling_started = True
+    return result
 
 
 @app.get("/health")
 def health_check() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/poll")
+def poll_bakuraku_applications() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "polled_at": _now_iso(),
+        "result": _poll_bakuraku_application_links_once(),
+    }
 
 @app.get("/ip")
 def get_ip():
