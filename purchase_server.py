@@ -149,7 +149,7 @@ def _build_relay_package(record: Dict[str, Any], bakuraku_file_id: str) -> Dict[
 
     rakuraku_payload = relay_client.build_rakuraku_record_payload(
         db_schema_id="101251",
-        request_status="購買申請中",
+        request_status="未申請",
         request_number=record["client_id"],
         product_code=record["project_id"],
         attachment_url=DEFAULT_ATTACHMENT_URL,
@@ -436,7 +436,7 @@ def notify_gui_after_rakuraku_update(payload: GuiNotificationPayload) -> Dict[st
     }
 
 
-@app.post("/api/rakuraku/records", status_code=202)
+@app.post("/api/rakuraku/records", status_code=200)
 def receive_rakuraku_record(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     received_id = f"rakuraku-{uuid4().hex[:12]}"
     rakuraku_record_id = str(
