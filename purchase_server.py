@@ -58,6 +58,7 @@ BAKURAKU_TERMINAL_STATUS_TO_RAKURAKU_STATUS = {
 }
 
 _firestore_client = None
+_firestore_last_error = None
 
 class PurchaseItem(BaseModel):
     item_code: str = Field(..., description="Item code from the GUI.")
@@ -91,21 +92,36 @@ def _now_iso() -> str:
 
 
 def _firestore_links_collection():
-    global _firestore_client
+    global _firestore_client, _firestore_last_error
 
     if firestore is None:
+        _firestore_last_error = "google-cloud-firestore is not installed."
         return None
 
     if _firestore_client is None:
         try:
             _firestore_client = firestore.Client(database=FIRESTORE_DATABASE_ID)
-        except Exception:
+            _firestore_last_error = None
+        except Exception as exc:
+            _firestore_last_error = str(exc)
             return None
 
     return _firestore_client.collection(FIRESTORE_COLLECTION_NAME)
 
 
+def _firestore_status() -> Dict[str, Any]:
+    return {
+        "available": firestore is not None,
+        "connected": _firestore_client is not None and _firestore_last_error is None,
+        "database_id": FIRESTORE_DATABASE_ID,
+        "collection_name": FIRESTORE_COLLECTION_NAME,
+        "last_error": _firestore_last_error,
+    }
+
+
 def _save_bakuraku_application_link(application_id: str, link: Dict[str, Any]) -> None:
+    global _firestore_last_error
+
     BAKURAKU_APPLICATION_LINKS[application_id] = link
 
     collection = _firestore_links_collection()
@@ -117,9 +133,12 @@ def _save_bakuraku_application_link(application_id: str, link: Dict[str, Any]) -
         link.pop("firestore_error", None)
     except Exception as exc:
         link["firestore_error"] = str(exc)
+        _firestore_last_error = str(exc)
 
 
 def _iter_bakuraku_application_links() -> List[tuple[str, Dict[str, Any]]]:
+    global _firestore_last_error
+
     collection = _firestore_links_collection()
     if collection is None:
         return list(BAKURAKU_APPLICATION_LINKS.items())
@@ -132,7 +151,8 @@ def _iter_bakuraku_application_links() -> List[tuple[str, Dict[str, Any]]]:
             if link.get("rakuraku_update_completed"):
                 continue
             links.append((document.id, link))
-    except Exception:
+    except Exception as exc:
+        _firestore_last_error = str(exc)
         return list(BAKURAKU_APPLICATION_LINKS.items())
 
     return links
@@ -395,10 +415,12 @@ def health_check() -> Dict[str, str]:
 
 @app.get("/poll")
 def poll_bakuraku_applications() -> Dict[str, Any]:
+    result = _poll_bakuraku_application_links_once()
     return {
         "status": "ok",
         "polled_at": _now_iso(),
-        "result": _poll_bakuraku_application_links_once(),
+        "firestore": _firestore_status(),
+        "result": result,
     }
 
 @app.get("/ip")
