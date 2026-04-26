@@ -459,7 +459,8 @@ def receive_rakuraku_record(payload: Dict[str, Any] = Body(...)) -> Dict[str, An
         ) from exc
 
     application_id = (
-        bakuraku_response.get("id")
+        bakuraku_response.get("requestId")
+        or bakuraku_response.get("id")
         or bakuraku_response.get("applicationId")
         or bakuraku_response.get("application_id")
     )
