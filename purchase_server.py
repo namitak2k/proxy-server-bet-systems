@@ -35,7 +35,6 @@ app.add_middleware(
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploaded_pdfs"
 UPLOAD_DIR.mkdir(exist_ok=True)
-RAKURAKU_TO_BAKURAKU_MAPPING_FILE = BASE_DIR / "rakuraku_to_bakuraku_mapping.json"
 
 PURCHASE_REQUESTS: Dict[str, Dict[str, Any]] = {}
 RELAY_PACKAGES: Dict[str, Dict[str, Any]] = {}
@@ -80,24 +79,6 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _load_rakuraku_to_bakuraku_mapping() -> List[Dict[str, str]]:
-    return json.loads(RAKURAKU_TO_BAKURAKU_MAPPING_FILE.read_text(encoding="utf-8"))
-
-
-def _set_nested_value(target: Dict[str, Any], path: str, value: Any) -> None:
-    keys = path.split(".")
-    current = target
-
-    for key in keys[:-1]:
-        child = current.get(key)
-        if not isinstance(child, dict):
-            child = {}
-            current[key] = child
-        current = child
-
-    current[keys[-1]] = value
-
-
 def _parse_json_array(raw_value: Any, field_name: str) -> List[Any]:
     if raw_value in (None, "", []):
         return []
@@ -116,10 +97,42 @@ def _parse_json_array(raw_value: Any, field_name: str) -> List[Any]:
     return parsed
 
 
-def _coerce_mapped_value(target_path: str, value: Any) -> Any:
-    if target_path == "defaultFieldValue.paymentAmount" and value not in (None, ""):
-        return int(value)
-    return value
+def _first_present(payload: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = payload.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _build_form_field_values_from_rakuraku(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    form_field_values = _parse_json_array(payload.get("formFieldValuesJson"), "formFieldValuesJson")
+    if form_field_values:
+        return form_field_values
+
+    form_field_title = payload.get("formFieldTitle")
+    raw_value = payload.get("rawValue")
+    if form_field_title in (None, "") and raw_value in (None, ""):
+        return []
+
+    return [
+        {
+            "formFieldTitle": form_field_title or "",
+            "rawValue": raw_value or "",
+        }
+    ]
+
+
+def _build_file_ids_from_rakuraku(payload: Dict[str, Any]) -> List[str]:
+    file_ids = [str(file_id) for file_id in _parse_json_array(payload.get("fileIdsJson"), "fileIdsJson")]
+    if file_ids:
+        return file_ids
+
+    file_id = _first_present(payload, "fileId", "fileID")
+    if file_id is None:
+        return []
+
+    return [str(file_id)]
 
 
 def _build_relay_package(record: Dict[str, Any], bakuraku_file_id: str) -> Dict[str, Any]:
@@ -174,27 +187,36 @@ def _build_relay_package(record: Dict[str, Any], bakuraku_file_id: str) -> Dict[
 
 
 def _build_bakuraku_application_from_rakuraku(payload: Dict[str, Any]) -> Dict[str, Any]:
-    if not BAKURAKU_FORM_ID:
-        raise HTTPException(status_code=500, detail="BAKURAKU_FORM_ID is required.")
+    form_id = _first_present(payload, "formId", "formID") or BAKURAKU_FORM_ID
+    if not form_id:
+        raise HTTPException(status_code=400, detail="formId or formID is required.")
 
-    rakuraku_record_id = str(payload.get("rakurakuRecordId", "")).strip()
-    if not rakuraku_record_id:
-        raise HTTPException(status_code=400, detail="rakurakuRecordId is required.")
+    payment_amount = payload.get("paymentAmount")
+    if payment_amount not in (None, ""):
+        payment_amount = int(payment_amount)
 
     bakuraku_payload: Dict[str, Any] = {
-        "formId": BAKURAKU_FORM_ID,
-        "defaultFieldValue": {},
-        "formFieldValues": _parse_json_array(payload.get("formFieldValuesJson"), "formFieldValuesJson"),
-        "fileIds": [str(file_id) for file_id in _parse_json_array(payload.get("fileIdsJson"), "fileIdsJson")],
+        "title": payload.get("title") or "",
+        "status": payload.get("status") or "IN_PROGRESS",
+        "formId": str(form_id),
+        "defaultFieldValue": {
+            "clientName": payload.get("clientName") or "",
+            "paymentAmount": payment_amount,
+            "approvalRemindsDate": payload.get("approvalRemindsDate") or "",
+            "purchaseCloseScheduledDate": payload.get("purchaseCloseScheduledDate") or "",
+            "tradingDate": payload.get("tradingDate") or "",
+        },
+        "formFieldValues": _build_form_field_values_from_rakuraku(payload),
+        "fileIds": _build_file_ids_from_rakuraku(payload),
     }
 
-    for mapping in _load_rakuraku_to_bakuraku_mapping():
-        source_key = mapping["source"]
-        target_path = mapping["target"]
-        if source_key not in payload:
-            continue
-        mapped_value = _coerce_mapped_value(target_path, payload[source_key])
-        _set_nested_value(bakuraku_payload, target_path, mapped_value)
+    default_field_value = bakuraku_payload["defaultFieldValue"]
+    if default_field_value.get("tradingDate") in (None, ""):
+        default_field_value["tradingDate"] = (
+            default_field_value.get("purchaseCloseScheduledDate")
+            or default_field_value.get("approvalRemindsDate")
+            or ""
+        )
 
     return bakuraku_payload
 
@@ -417,9 +439,9 @@ def notify_gui_after_rakuraku_update(payload: GuiNotificationPayload) -> Dict[st
 @app.post("/api/rakuraku/records", status_code=202)
 def receive_rakuraku_record(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     received_id = f"rakuraku-{uuid4().hex[:12]}"
-    rakuraku_record_id = str(payload.get("rakurakuRecordId", "")).strip()
-    if not rakuraku_record_id:
-        raise HTTPException(status_code=400, detail="rakurakuRecordId is required.")
+    rakuraku_record_id = str(
+        _first_present(payload, "rakurakuRecordId", "recordId") or received_id
+    ).strip()
 
     bakuraku_request_payload = _build_bakuraku_application_from_rakuraku(payload)
 
