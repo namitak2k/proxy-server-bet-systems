@@ -18,6 +18,11 @@ try:
 except ImportError:
     firestore = None
 
+try:
+    from google.cloud import pubsub_v1
+except ImportError:
+    pubsub_v1 = None
+
 
 app = FastAPI(
     title="Proxy Purchase Systems",
@@ -45,6 +50,7 @@ WEBHOOK_HISTORY: List[Dict[str, Any]] = []
 RAKURAKU_RECEIVED_REQUESTS: Dict[str, Dict[str, Any]] = {}
 BAKURAKU_APPLICATION_LINKS: Dict[str, Dict[str, Any]] = {}
 
+TOPIC_PATH = os.getenv("PUBSUB_TOPIC_PATH", "").strip()
 BAKURAKU_FORM_ID = os.getenv("BAKURAKU_FORM_ID", "").strip()
 FIRESTORE_COLLECTION_NAME = os.getenv(
     "FIRESTORE_COLLECTION_NAME",
@@ -59,6 +65,7 @@ BAKURAKU_TERMINAL_STATUS_TO_RAKURAKU_STATUS = {
 
 _firestore_client = None
 _firestore_last_error = None
+_publisher = None
 
 class PurchaseItem(BaseModel):
     item_code: str = Field(..., description="Item code from the GUI.")
@@ -182,6 +189,67 @@ def _first_present(payload: Dict[str, Any], *keys: str) -> Any:
         if value not in (None, ""):
             return value
     return None
+
+
+def _get_publisher():
+    global _publisher
+
+    if pubsub_v1 is None:
+        raise RuntimeError("google-cloud-pubsub is not installed.")
+
+    if not TOPIC_PATH:
+        raise RuntimeError("Environment variable 'PUBSUB_TOPIC_PATH' is required.")
+
+    if _publisher is None:
+        _publisher = pubsub_v1.PublisherClient()
+
+    return _publisher
+
+
+def _extract_rakuraku_record_id(response: Dict[str, Any]) -> Optional[str]:
+    items = response.get("items")
+    if isinstance(items, dict):
+        key_id = items.get("keyId")
+        if key_id not in (None, ""):
+            return str(key_id)
+
+    record_id = _first_present(response, "recordId", "recordID", "record_id", "id")
+    if record_id is not None:
+        return str(record_id)
+
+    record = response.get("record")
+    if isinstance(record, dict):
+        record_id = _first_present(record, "recordId", "recordID", "record_id", "id")
+        if record_id is not None:
+            return str(record_id)
+
+    return None
+
+
+def send_to_partner_topic(payload: dict):
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    future = _get_publisher().publish(
+        TOPIC_PATH,
+        data=data,
+        content_type="application/json",
+    )
+
+    return future.result()
+
+
+def _publish_partner_email_request(db_schema_id: Any, record_id: Any) -> Dict[str, Any]:
+    pubsub_payload = {
+        "dbSchemaId": str(db_schema_id),
+        "recordId": str(record_id),
+    }
+    message_id = send_to_partner_topic(pubsub_payload)
+    return {
+        "topic_path": TOPIC_PATH,
+        "message_id": message_id,
+        "payload": pubsub_payload,
+        "published_at": _now_iso(),
+    }
 
 
 def _build_form_field_values_from_rakuraku(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -393,14 +461,36 @@ def _poll_bakuraku_application_links_once() -> Dict[str, Any]:
             result["links"].append(link_result)
             continue
 
+        try:
+            partner_pubsub_result = _publish_partner_email_request(
+                rakuraku_update_payload["dbSchemaId"],
+                rakuraku_update_payload["id"],
+            )
+        except Exception as exc:
+            link["partner_pubsub_error"] = str(exc)
+            link["partner_pubsub_payload"] = {
+                "dbSchemaId": rakuraku_update_payload["dbSchemaId"],
+                "recordId": rakuraku_update_payload["id"],
+            }
+            link["partner_pubsub_failed_at"] = _now_iso()
+            link["rakuraku_update_payload"] = rakuraku_update_payload
+            link["rakuraku_update_response"] = rakuraku_update_response
+            _save_bakuraku_application_link(application_id, link)
+            link_result["error"] = str(exc)
+            result["failed"] += 1
+            result["links"].append(link_result)
+            continue
+
         link["status_updated_at"] = _now_iso()
         link["rakuraku_status"] = rakuraku_status
         link["rakuraku_update_payload"] = rakuraku_update_payload
         link["rakuraku_update_response"] = rakuraku_update_response
+        link["partner_pubsub_result"] = partner_pubsub_result
         link["rakuraku_update_completed"] = True
         link["rakuraku_updated_at"] = _now_iso()
         link_result["rakuraku_status"] = rakuraku_status
         link_result["updated"] = True
+        link_result["partner_pubsub_result"] = partner_pubsub_result
         _save_bakuraku_application_link(application_id, link)
         result["updated"] += 1
         result["links"].append(link_result)
@@ -532,6 +622,36 @@ async def receive_purchase_submission(
     record["rakuraku_response"] = rakuraku_response
     relay_package["rakuraku_response"] = rakuraku_response
 
+    rakuraku_record_id = _extract_rakuraku_record_id(rakuraku_response)
+    if not rakuraku_record_id:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Rakuraku response did not include a record ID.",
+                "rakuraku_response": rakuraku_response,
+            },
+        )
+
+    try:
+        partner_pubsub_result = _publish_partner_email_request(
+            relay_package["rakuraku_record_payload"]["dbSchemaId"],
+            rakuraku_record_id,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Failed to publish partner email request to Pub/Sub.",
+                "error": str(exc),
+                "dbSchemaId": relay_package["rakuraku_record_payload"]["dbSchemaId"],
+                "recordId": rakuraku_record_id,
+            },
+        ) from exc
+
+    record["rakuraku_record_id"] = rakuraku_record_id
+    record["partner_pubsub_result"] = partner_pubsub_result
+    relay_package["partner_pubsub_result"] = partner_pubsub_result
+
     return {
         "message": "Purchase submission accepted and posted to Rakuraku.",
         "request_id": server_request_id,
@@ -539,6 +659,7 @@ async def receive_purchase_submission(
         "relay_package": relay_package,
         "bakuraku_file_response": bakuraku_file_response,
         "rakuraku_response": rakuraku_response,
+        "partner_pubsub_result": partner_pubsub_result,
     }
 
 
